@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Datasets
+moth_detector/train/
+moth_detector/val/
+moth_detector/test/
+
+# Predictions & outputs
+preds/
+
+# macOS junk
+.DS_Store
