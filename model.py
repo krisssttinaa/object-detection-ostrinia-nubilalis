@@ -1,15 +1,13 @@
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
-
 def build_model(num_classes: int = 2):
     """
-    num_classes includes background.
+    num_classes includes background
     For one object class (moth): num_classes = 2 (background + moth)
     """
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights="DEFAULT")
 
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-
     return model

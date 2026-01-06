@@ -1,14 +1,11 @@
 import argparse
 import os
 from typing import List, Tuple
-
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-
 from dataset import MothDetectionDataset, collate_fn
 from model import build_model
-
 
 def iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
     x1 = max(box_a[0], box_b[0])
@@ -20,7 +17,6 @@ def iou(box_a: np.ndarray, box_b: np.ndarray) -> float:
     area_b = max(0.0, box_b[2] - box_b[0]) * max(0.0, box_b[3] - box_b[1])
     union = area_a + area_b - inter
     return float(inter / union) if union > 0 else 0.0
-
 
 def match_detections_to_gt(
     det_boxes: np.ndarray,
@@ -40,12 +36,9 @@ def match_detections_to_gt(
     order = np.argsort(-det_scores)
     det_boxes = det_boxes[order]
     det_scores = det_scores[order]
-
     gt_used = np.zeros((gt_boxes.shape[0],), dtype=bool)
-
     tp = 0
     fp = 0
-
     for db in det_boxes:
         best_iou = 0.0
         best_j = -1
@@ -61,10 +54,8 @@ def match_detections_to_gt(
             gt_used[best_j] = True
         else:
             fp += 1
-
     fn = int((~gt_used).sum())
     return tp, fp, fn
-
 
 @torch.no_grad()
 def main():
@@ -90,18 +81,15 @@ def main():
     #    device = torch.device("cpu")
 
     #print("Using device:", device)
-
     model = build_model(num_classes=2).to(device)
     ckpt = torch.load(args.ckpt, map_location="cpu")
     model.load_state_dict(ckpt["model"])
     model.eval()
 
     TP = FP = FN = 0
-
     for images, targets in loader:
         images = [img.to(device) for img in images]
         outputs = model(images)
-
         # batch_size=1 typical; handle general batch anyway
         for out, tgt in zip(outputs, targets):
             det_boxes = out["boxes"].detach().cpu().numpy().astype(np.float32)
@@ -125,6 +113,4 @@ def main():
     print(f"Recall   ={recall:.4f}")
     print(f"F1       ={f1:.4f}")
 
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
