@@ -1,23 +1,18 @@
 import os
+import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple
 import numpy as np
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
 
-@dataclass
-class SvgMeta:
-    svg_width: float
-    svg_height: float
-    viewbox: Tuple[float, float, float, float]  # (minx, miny, vbw, vbh)
+_STYLE_KV = re.compile(r"\s*([a-zA-Z\-]+)\s*:\s*([^;]+)\s*;?")
 
 def _strip_unit(x: str) -> float:
     x = (x or "").strip()
     if not x:
         return 0.0
-    # handle percentages (not meaningful for root width/height)
     if x.endswith("%"):
         return 0.0
     for suf in ["px", "pt", "cm", "mm", "in"]:
@@ -29,121 +24,126 @@ def _strip_unit(x: str) -> float:
     except Exception:
         return 0.0
 
+def _parse_style(style: str) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    s = (style or "").strip()
+    if not s:
+        return out
+    for m in _STYLE_KV.finditer(s):
+        out[m.group(1).strip().lower()] = m.group(2).strip()
+    return out
+
+def _norm_color(c: str) -> str:
+    c = (c or "").strip().lower()
+    if not c:
+        return ""
+    if c == "none":
+        return ""
+    if c.startswith("rgb(") and c.endswith(")"):
+        try:
+            nums = c[4:-1].split(",")
+            r = int(float(nums[0]))
+            g = int(float(nums[1]))
+            b = int(float(nums[2]))
+            return "#{:02x}{:02x}{:02x}".format(r, g, b)
+        except Exception:
+            return c
+    return c
+
+def _local_tag(el: ET.Element) -> str:
+    return el.tag.split("}")[-1].lower().strip()
+
 def _parse_viewbox(vb: str) -> Tuple[float, float, float, float]:
     parts = (vb or "").replace(",", " ").split()
     if len(parts) != 4:
         return (0.0, 0.0, 0.0, 0.0)
-    return tuple(float(x) for x in parts)  # type: ignore
+    try:
+        return (float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]))
+    except Exception:
+        return (0.0, 0.0, 0.0, 0.0)
 
-def _get_svg_meta(root: ET.Element) -> SvgMeta:
-    w = root.attrib.get("width", "0")
-    h = root.attrib.get("height", "0")
-    svg_w = _strip_unit(w)
-    svg_h = _strip_unit(h)
-    vb_attr = root.attrib.get("viewBox") or root.attrib.get("viewbox") or ""
-    if vb_attr:
-        vb = _parse_viewbox(vb_attr)
-    else:
-        vb = (0.0, 0.0, svg_w, svg_h)
+def _rect_xywh(rect: ET.Element) -> Tuple[float, float, float, float]:
+    def f(k: str) -> float:
+        v = (rect.attrib.get(k, "0") or "0").strip()
+        return _strip_unit(v)
+    return f("x"), f("y"), f("width"), f("height")
 
-    # If width/height missing, use viewBox size
-    if svg_w <= 0 and vb[2] > 0:
-        svg_w = vb[2]
-    if svg_h <= 0 and vb[3] > 0:
-        svg_h = vb[3]
-    return SvgMeta(svg_width=svg_w, svg_height=svg_h, viewbox=vb)
-
-def _iter_rects(root: ET.Element) -> List[ET.Element]:
-    rects: List[ET.Element] = []
-    for el in root.iter():
-        tag = el.tag.split("}")[-1]  # strip namespace
-        if tag == "rect":
-            rects.append(el)
-    return rects
-
-def _rect_to_xywh(rect: ET.Element) -> Tuple[float, float, float, float]:
-    # SVG rect can have x/y/width/height
-    x = float(rect.attrib.get("x", "0") or "0")
-    y = float(rect.attrib.get("y", "0") or "0")
-    w = float(rect.attrib.get("width", "0") or "0")
-    h = float(rect.attrib.get("height", "0") or "0")
-    return x, y, w, h
-
-def parse_svg_to_boxes_labels(svg_path: str, img_w: int, img_h: int) -> Tuple[np.ndarray, np.ndarray]:
+def parse_svg_green_boxes(svg_path: str, img_w: int, img_h: int) -> np.ndarray:
     """
-    boxes: Nx4 float32 in image pixel coords [x1,y1,x2,y2]
-    labels: N int64 (1=ostrinia, 2=non_target)
-    Only keeps true manual annotation rectangles, NOT helper rectangles like flyArea.
+    returns Nx4 float32 [x1,y1,x2,y2] in image pixel coordinates.
+    accepts green boxes defined by:
+      - id starts with flyManual OR
+      - stroke is green in either attribute stroke="..." OR style="stroke:..."
+    skips helper flyArea rectangles
     """
     tree = ET.parse(svg_path)
     root = tree.getroot()
-    meta = _get_svg_meta(root)
-    minx, miny, vbw, vbh = meta.viewbox
+    vb_attr = root.attrib.get("viewBox") or root.attrib.get("viewbox") or ""
+    if vb_attr:
+        minx, miny, vbw, vbh = _parse_viewbox(vb_attr)
+    else:
+        vbw = _strip_unit(root.attrib.get("width", "0"))
+        vbh = _strip_unit(root.attrib.get("height", "0"))
+        minx, miny = 0.0, 0.0
+        #fallback if SVG omits both viewBox and w/h
+        if vbw <= 0:
+            vbw = float(img_w)
+        if vbh <= 0:
+            vbh = float(img_h)
 
-    # Protect against bad viewBox
     if vbw <= 0 or vbh <= 0:
-        return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.int64)
+        return np.zeros((0, 4), dtype=np.float32)
 
     sx = float(img_w) / float(vbw)
     sy = float(img_h) / float(vbh)
     boxes: List[List[float]] = []
-    labels: List[int] = []
-    for rect in _iter_rects(root):
-        rid = (rect.attrib.get("id") or "").strip()
-        stroke = (rect.attrib.get("stroke") or "").strip().lower()
-        visibility = (rect.attrib.get("visibility") or "").strip().lower()
-        # 1) drop hidden helper rects
+    for el in root.iter():
+        if _local_tag(el) != "rect":
+            continue
+        rid = (el.attrib.get("id") or "").strip()
+        visibility = (el.attrib.get("visibility") or "").strip().lower()
         if visibility == "hidden":
             continue
-        # 2) drop flyArea (huge frame) and other non-manual helper ids
-        if rid == "flyArea" or rid.startswith("flyArea"):
-            continue
-        # 3) determine class:
-        #    - manual ostrinia boxes are green in your dataset (#41D100) and/or id starts with flyManual
-        #    - optional: non_target can be marked red (#FF0000) later
-        label = None
-        if rid.startswith("flyManual") or stroke in {"#41d100", "#00ff00", "#00ff00ff"}:
-            label = 1  # ostrinia
-        elif rid.startswith("nonTarget") or stroke in {"#ff0000", "#ff2d2d", "#d10000"}:
-            label = 2  # non_target (optional future)
-        else:
-            # Ignore any other rects (borders, guides, etc.)
+        if rid == "flyArea" or rid.lower().startswith("flyarea"):
             continue
 
-        x, y, w, h = _rect_to_xywh(rect)
+        style = _parse_style(el.attrib.get("style", ""))
+        stroke_attr = _norm_color(el.attrib.get("stroke", ""))
+        stroke_style = _norm_color(style.get("stroke", ""))
+        stroke = stroke_attr or stroke_style
+        is_green = stroke in {"#41d100", "#00ff00", "#00ff00ff", "lime", "green"}
+        is_manual = rid.lower().startswith("flymanual")
+
+        if not (is_green or is_manual):
+            continue
+        x, y, w, h = _rect_xywh(el)
         if w <= 1 or h <= 1:
             continue
-
-        # Convert from SVG user space to viewBox space (account for minx/miny), then to image pixels
         x1 = (x - minx) * sx
         y1 = (y - miny) * sy
         x2 = (x + w - minx) * sx
         y2 = (y + h - miny) * sy
-
-        # Clamp
         x1 = max(0.0, min(float(img_w), x1))
         y1 = max(0.0, min(float(img_h), y1))
         x2 = max(0.0, min(float(img_w), x2))
         y2 = max(0.0, min(float(img_h), y2))
         if x2 > x1 + 1 and y2 > y1 + 1:
             boxes.append([x1, y1, x2, y2])
-            labels.append(int(label))
     if not boxes:
-        return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.int64)
-    return np.array(boxes, dtype=np.float32), np.array(labels, dtype=np.int64)
+        return np.zeros((0, 4), dtype=np.float32)
+    return np.asarray(boxes, dtype=np.float32)
 
 class MothDetectionDataset(Dataset):
     """
-    Expects split_dir containing *.jpg and matching *.svg with same stem.
-    Produces torchvision-style targets for Faster R-CNN.
+    split_dir containing *.jpg and matching *.svg with same stem
+    labels: always 1 for moth (ostrinia), background is implicit (0)
+    empty images are valid and important for learning background
     """
     def __init__(self, split_dir: str):
         self.split_dir = split_dir
-        self.images: List[str] = []
-        for fn in os.listdir(split_dir):
-            if fn.lower().endswith(".jpg") or fn.lower().endswith(".jpeg"):
-                self.images.append(fn)
-        self.images.sort()
+        self.images = sorted([f for f in os.listdir(split_dir) if f.lower().endswith((".jpg", ".jpeg"))])
+        if not self.images:
+            raise FileNotFoundError(f"No JPG images found in {split_dir}")
 
         missing = []
         for img_fn in self.images:
@@ -154,32 +154,33 @@ class MothDetectionDataset(Dataset):
         if missing:
             raise FileNotFoundError(f"Missing SVG for {len(missing)} images. Example: {missing[0]}")
 
-    def __len__(self):
-        return len(self.images)
+    def __len__(self): return len(self.images)
 
     def __getitem__(self, idx: int):
         img_fn = self.images[idx]
         stem = os.path.splitext(img_fn)[0]
         img_path = os.path.join(self.split_dir, img_fn)
         svg_path = os.path.join(self.split_dir, stem + ".svg")
-
         img = Image.open(img_path).convert("RGB")
         img_w, img_h = img.size
+        boxes = parse_svg_green_boxes(svg_path, img_w, img_h)
+        labels = np.ones((boxes.shape[0],), dtype=np.int64)
+        arr = np.array(img, dtype=np.uint8, copy=True)
+        img_t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
+        boxes_t = torch.as_tensor(boxes, dtype=torch.float32)
+        labels_t = torch.as_tensor(labels, dtype=torch.int64)
 
-        boxes, labels = parse_svg_to_boxes_labels(svg_path, img_w, img_h)
+        if boxes_t.numel() > 0:
+            area = (boxes_t[:, 2] - boxes_t[:, 0]) * (boxes_t[:, 3] - boxes_t[:, 1])
+        else:
+            area = torch.zeros((0,), dtype=torch.float32)
 
-        num = int(boxes.shape[0])
         target: Dict[str, Any] = {
-            "boxes": torch.as_tensor(boxes, dtype=torch.float32),
-            "labels": torch.as_tensor(labels, dtype=torch.int64),
+            "boxes": boxes_t,
+            "labels": labels_t,
             "image_id": torch.tensor([idx], dtype=torch.int64),
-            "area": torch.as_tensor(
-                (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]),
-                dtype=torch.float32
-            ) if num > 0 else torch.zeros((0,), dtype=torch.float32),
-            "iscrowd": torch.zeros((num,), dtype=torch.int64),
-        }
-        img_t = torch.from_numpy(np.array(img, dtype=np.uint8)).permute(2, 0, 1).float() / 255.0
+            "area": area,
+            "iscrowd": torch.zeros((boxes_t.shape[0],), dtype=torch.int64),}
         return img_t, target
 
 def collate_fn(batch):
