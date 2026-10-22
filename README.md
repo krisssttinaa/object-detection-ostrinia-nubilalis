@@ -2,6 +2,15 @@
 
 Object detection of the European corn borer (*Ostrinia nubilalis*) in trap photographs using a custom Faster R-CNN architecture with a ResNet-50/FPN backbone, focal classification loss, CIoU bounding-box regression, and anchors adapted to the training annotations.
 
+## Baseline and modified Faster R-CNN
+
+This repository retains **both** implementations for comparison:
+
+- `model_faster_rcnn_baseline.py` — the original baseline model from the comparison archive, preserved without changes.
+- `model_faster_rcnn.py` — the modified Faster R-CNN model, which is the **default used by training, evaluation, and prediction scripts**. It includes Focal Loss, CIoU Loss, and data-adaptive anchors.
+
+The baseline is retained as a reference implementation; the provided command-line workflows do not automatically run a baseline-versus-modified experiment.
+
 ## Custom Faster R-CNN modifications
 
 This project builds on **Faster R-CNN with a ResNet-50 + Feature Pyramid Network (FPN) backbone** and introduces three changes to the detection pipeline:
@@ -17,7 +26,8 @@ This project builds on **Faster R-CNN with a ResNet-50 + Feature Pyramid Network
 | Path | Purpose |
 | --- | --- |
 | `dataset.py` | Image loading and SVG bounding-box annotation parsing |
-| `model_faster_rcnn.py` | Model construction, custom ROI heads and loss functions |
+| `model_faster_rcnn.py` | Modified model construction, custom ROI heads and loss functions (default) |
+| `model_faster_rcnn_baseline.py` | Unmodified baseline model for comparison |
 | `train_model.py` | Training and validation-loss checkpointing |
 | `evaluate_model.py` | Detection evaluation on annotated images |
 | `predict.py` | Inference and rendering of predictions for one image |
