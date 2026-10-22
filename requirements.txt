@@ -1,0 +1,6 @@
+# Install a matching PyTorch + TorchVision pair for your CPU/CUDA platform.
+# See https://pytorch.org/get-started/locally/
+torch>=2.3,<2.11
+torchvision>=0.18,<0.26
+numpy>=1.24,<3
+Pillow>=10,<13

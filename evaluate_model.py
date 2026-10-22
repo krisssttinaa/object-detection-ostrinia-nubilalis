@@ -102,8 +102,11 @@ def main():
     else:
         device = torch.device("cpu")
 
-    model = build_custom_model(num_classes=2).to(device)
-    ckpt = torch.load(args.ckpt, map_location="cpu")
+    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    anchor_sizes = ckpt.get("anchor_sizes", (32, 64, 128, 256, 512))
+    anchor_ratios = ckpt.get("anchor_ratios", (0.5, 1.0, 2.0))
+    print("Checkpoint anchors:", anchor_sizes, "ratios (h/w):", anchor_ratios)
+    model = build_custom_model(num_classes=2, anchor_sizes=anchor_sizes, anchor_ratios=anchor_ratios, load_backbone_weights=False).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     img_paths = iter_images(args.test_dir)[: args.max_images]

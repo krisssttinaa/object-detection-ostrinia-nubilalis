@@ -3,9 +3,42 @@ import os
 import time
 from typing import Dict
 import torch
+import numpy as np
 from torch.utils.data import DataLoader
 from dataset import MothDetectionDataset, collate_fn
 from model_faster_rcnn import build_custom_model
+
+def derive_anchors(train_ds, min_size=800, max_size=1333):
+    """Derive 5 FPN anchor scales and 3 aspect ratios from TRAIN annotations only.
+    Box sizes are measured after the same resize used by Faster R-CNN.
+    TorchVision aspect ratio is height / width.
+    """
+    scales, ratios = [], []
+    for i in range(len(train_ds)):
+        img, target = train_ds[i]
+        _, h, w = img.shape
+        boxes = target["boxes"]
+        if boxes.numel() == 0:
+            continue
+        resize = min(float(min_size) / min(h, w), float(max_size) / max(h, w))
+        bw = (boxes[:, 2] - boxes[:, 0]).numpy() * resize
+        bh = (boxes[:, 3] - boxes[:, 1]).numpy() * resize
+        scales.extend(np.sqrt(bw * bh).tolist())
+        ratios.extend((bh / np.maximum(bw, 1e-6)).tolist())
+    if not scales:
+        raise RuntimeError("No Ostrinia boxes found in the training split; cannot derive anchors.")
+    # Five representative object scales for the five FPN levels.
+    raw_sizes = np.quantile(np.asarray(scales), [0.10, 0.30, 0.50, 0.70, 0.90])
+    sizes = []
+    for x in raw_sizes:
+        v = max(8, int(round(float(x) / 8.0) * 8))
+        if sizes and v <= sizes[-1]:
+            v = sizes[-1] + 8
+        sizes.append(v)
+    # Preserve pose variation with low/median/high training-set aspect ratios.
+    raw_ratios = np.quantile(np.asarray(ratios), [0.10, 0.50, 0.90])
+    ars = [round(float(np.clip(x, 0.25, 4.0)), 3) for x in raw_ratios]
+    return tuple(sizes), tuple(ars), len(scales)
 
 def set_seed(seed: int):
     torch.manual_seed(seed)
@@ -36,7 +69,7 @@ def evaluate_val_loss(model, loader, device) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", type=str, required=True)
-    ap.add_argument("--out_dir", type=str, default="runs_custom")
+    ap.add_argument("--out_dir", type=str, default="runs_focal_ciou")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=1)
     ap.add_argument("--lr", type=float, default=0.005)
@@ -66,7 +99,12 @@ def main():
         device = torch.device("cpu")
 
     print("Using device:", device)
-    model = build_custom_model(num_classes=2).to(device)
+    print("ROI losses: Focal Loss (alpha_pos=0.25, alpha_neg=0.75, gamma=2.0) + CIoU")
+    anchor_sizes, anchor_ratios, n_boxes = derive_anchors(train_ds)
+    print(f"Anchors: TRAIN-set adapted from {n_boxes} Ostrinia boxes")
+    print("  sizes:", anchor_sizes)
+    print("  aspect ratios (h/w):", anchor_ratios)
+    model = build_custom_model(num_classes=2, anchor_sizes=anchor_sizes, anchor_ratios=anchor_ratios).to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     #torchvision reference-style hyperparams
     optimizer = torch.optim.SGD(
@@ -120,10 +158,10 @@ def main():
         val_loss = evaluate_val_loss(model, val_loader, device)
         dt = time.time() - t0
         print(f"Epoch {epoch:03d}/{args.epochs} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | time={dt:.1f}s")
-        torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss}, last_path)
+        torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss, "anchor_sizes": anchor_sizes, "anchor_ratios": anchor_ratios}, last_path)
         if val_loss < best_val:
             best_val = val_loss
-            torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss}, best_path)
+            torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss, "anchor_sizes": anchor_sizes, "anchor_ratios": anchor_ratios}, best_path)
             print(f"  -> saved new best: {best_path} (val_loss={best_val:.4f})")
     print("Training finished.")
     print("Best:", best_path)

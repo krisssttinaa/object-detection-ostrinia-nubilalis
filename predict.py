@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
@@ -21,8 +22,13 @@ def main():
     else:
         device = torch.device("cpu")
 
-    model = build_custom_model(num_classes=2).to(device)
-    ckpt = torch.load(args.ckpt, map_location="cpu")
+    ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=True)
+    model = build_custom_model(
+        num_classes=2,
+        anchor_sizes=ckpt.get("anchor_sizes", (32, 64, 128, 256, 512)),
+        anchor_ratios=ckpt.get("anchor_ratios", (0.5, 1.0, 2.0)),
+        load_backbone_weights=False,
+    ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     img = Image.open(args.image).convert("RGB")
@@ -39,6 +45,7 @@ def main():
         draw.rectangle([x1, y1, x2, y2], outline="white", width=3)
         draw.text((x1 + 2, y1 + 2), f"{float(s):.2f}", fill="white")
         kept += 1
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     img.save(args.out)
     print(f"Saved {args.out} | kept={kept} (score_thr={args.score_thr})")
 
